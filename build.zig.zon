@@ -3,7 +3,12 @@
     .version = "0.1.0",
     .fingerprint = 0x2b5570d22f646eea,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .zspec = .{
+            .url = "https://github.com/apotema/zspec/archive/v0.9.1.tar.gz",
+            .hash = "zspec-0.9.1-jaKLbbX4AwBKANdetxzzWc3UTO0UY0lcJJzTagQHlt5K",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

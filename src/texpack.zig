@@ -276,12 +276,14 @@ fn pngWrite(ctx: ?*anyopaque, data: ?*anyopaque, size: c_int) callconv(.c) void 
     };
 }
 
-test {
-    _ = @import("maxrects.zig");
-    _ = @import("atlas_json.zig");
-}
+const zspec = @import("zspec");
+const expect = zspec.expect;
 
-const testing = std.testing;
+test {
+    // Pull in the per-file specs of the sibling modules, then run this
+    // file's own. `maxrects`/`atlas_json` are already imported above.
+    zspec.runAll(@This());
+}
 
 /// Encode a solid-color `w`×`h` RGBA image to PNG bytes (test fixture).
 fn encodeSolidPng(allocator: std.mem.Allocator, w: i32, h: i32, rgba: [4]u8) ![]u8 {
@@ -301,92 +303,94 @@ fn encodeSolidPng(allocator: std.mem.Allocator, w: i32, h: i32, rgba: [4]u8) ![]
     return sink.list.toOwnedSlice(allocator);
 }
 
-test "packDir packs a folder into a valid atlas pair" {
-    const allocator = testing.allocator;
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+pub const PackDir = struct {
+    test "packs a folder into a valid atlas pair" {
+        const allocator = std.testing.allocator;
+        var threaded: std.Io.Threaded = .init(allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
 
-    const cwd = std.Io.Dir.cwd();
-    const work = ".zig-cache/texpack-itest";
-    cwd.deleteTree(io, work) catch {};
-    try cwd.createDirPath(io, work);
-    defer cwd.deleteTree(io, work) catch {};
+        const cwd = std.Io.Dir.cwd();
+        const work = ".zig-cache/texpack-itest";
+        cwd.deleteTree(io, work) catch {};
+        try cwd.createDirPath(io, work);
+        defer cwd.deleteTree(io, work) catch {};
 
-    // Three differently-sized fixtures with distinct colors.
-    const fixtures = [_]struct { name: []const u8, w: i32, h: i32, rgba: [4]u8 }{
-        .{ .name = "red.png", .w = 30, .h = 20, .rgba = .{ 255, 0, 0, 255 } },
-        .{ .name = "green.png", .w = 16, .h = 40, .rgba = .{ 0, 255, 0, 255 } },
-        .{ .name = "blue.png", .w = 24, .h = 24, .rgba = .{ 0, 0, 255, 255 } },
-    };
-    for (fixtures) |fx| {
-        const png = try encodeSolidPng(allocator, fx.w, fx.h, fx.rgba);
-        defer allocator.free(png);
-        const path = try std.fs.path.join(allocator, &.{ work, fx.name });
-        defer allocator.free(path);
-        try cwd.writeFile(io, .{ .sub_path = path, .data = png });
-    }
-
-    const result = try packDir(allocator, io, work, work, "sheet", .{});
-    defer result.deinit(allocator);
-    try testing.expectEqual(@as(usize, 3), result.sprite_count);
-
-    // The JSON sidecar parses and every frame stays inside the sheet.
-    const json = try cwd.readFileAlloc(io, result.json_path, allocator, .limited(1 << 20));
-    defer allocator.free(json);
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
-    defer parsed.deinit();
-    const frames = parsed.value.object.get("frames").?.object;
-    try testing.expectEqual(@as(usize, 3), frames.count());
-
-    var rects: [3]maxrects.Rect = undefined;
-    var it = frames.iterator();
-    var n: usize = 0;
-    while (it.next()) |entry| : (n += 1) {
-        const f = entry.value_ptr.object.get("frame").?.object;
-        rects[n] = .{
-            .x = @intCast(f.get("x").?.integer),
-            .y = @intCast(f.get("y").?.integer),
-            .w = @intCast(f.get("w").?.integer),
-            .h = @intCast(f.get("h").?.integer),
+        // Three differently-sized fixtures with distinct colors.
+        const fixtures = [_]struct { name: []const u8, w: i32, h: i32, rgba: [4]u8 }{
+            .{ .name = "red.png", .w = 30, .h = 20, .rgba = .{ 255, 0, 0, 255 } },
+            .{ .name = "green.png", .w = 16, .h = 40, .rgba = .{ 0, 255, 0, 255 } },
+            .{ .name = "blue.png", .w = 24, .h = 24, .rgba = .{ 0, 0, 255, 255 } },
         };
-        try testing.expect(rects[n].x >= 0 and rects[n].y >= 0);
-        try testing.expect(rects[n].x + rects[n].w <= result.sheet_w);
-        try testing.expect(rects[n].y + rects[n].h <= result.sheet_h);
-    }
-    // No two packed sprites overlap.
-    for (rects, 0..) |a, i| {
-        for (rects[i + 1 ..]) |b| {
-            const disjoint = a.x + a.w <= b.x or b.x + b.w <= a.x or
-                a.y + a.h <= b.y or b.y + b.h <= a.y;
-            try testing.expect(disjoint);
+        for (fixtures) |fx| {
+            const png = try encodeSolidPng(allocator, fx.w, fx.h, fx.rgba);
+            defer allocator.free(png);
+            const path = try std.fs.path.join(allocator, &.{ work, fx.name });
+            defer allocator.free(path);
+            try cwd.writeFile(io, .{ .sub_path = path, .data = png });
         }
+
+        const result = try packDir(allocator, io, work, work, "sheet", .{});
+        defer result.deinit(allocator);
+        try expect.equal(result.sprite_count, @as(usize, 3));
+
+        // The JSON sidecar parses and every frame stays inside the sheet.
+        const json = try cwd.readFileAlloc(io, result.json_path, allocator, .limited(1 << 20));
+        defer allocator.free(json);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        defer parsed.deinit();
+        const frames = parsed.value.object.get("frames").?.object;
+        try expect.equal(frames.count(), @as(usize, 3));
+
+        var rects: [3]maxrects.Rect = undefined;
+        var it = frames.iterator();
+        var n: usize = 0;
+        while (it.next()) |entry| : (n += 1) {
+            const f = entry.value_ptr.object.get("frame").?.object;
+            rects[n] = .{
+                .x = @intCast(f.get("x").?.integer),
+                .y = @intCast(f.get("y").?.integer),
+                .w = @intCast(f.get("w").?.integer),
+                .h = @intCast(f.get("h").?.integer),
+            };
+            try expect.toBeTrue(rects[n].x >= 0 and rects[n].y >= 0);
+            try expect.toBeTrue(rects[n].x + rects[n].w <= result.sheet_w);
+            try expect.toBeTrue(rects[n].y + rects[n].h <= result.sheet_h);
+        }
+        // No two packed sprites overlap.
+        for (rects, 0..) |a, i| {
+            for (rects[i + 1 ..]) |b| {
+                const disjoint = a.x + a.w <= b.x or b.x + b.w <= a.x or
+                    a.y + a.h <= b.y or b.y + b.h <= a.y;
+                try expect.toBeTrue(disjoint);
+            }
+        }
+
+        // The atlas PNG decodes and matches the reported sheet size.
+        const png_bytes = try cwd.readFileAlloc(io, result.png_path, allocator, .limited(1 << 24));
+        defer allocator.free(png_bytes);
+        var dw: c_int = 0;
+        var dh: c_int = 0;
+        var dch: c_int = 0;
+        const pixels = c.stbi_load_from_memory(png_bytes.ptr, @intCast(png_bytes.len), &dw, &dh, &dch, 4);
+        try expect.notToBeNull(pixels);
+        defer c.stbi_image_free(pixels);
+        try expect.equal(@as(i32, @intCast(dw)), result.sheet_w);
+        try expect.equal(@as(i32, @intCast(dh)), result.sheet_h);
     }
 
-    // The atlas PNG decodes and matches the reported sheet size.
-    const png_bytes = try cwd.readFileAlloc(io, result.png_path, allocator, .limited(1 << 24));
-    defer allocator.free(png_bytes);
-    var dw: c_int = 0;
-    var dh: c_int = 0;
-    var dch: c_int = 0;
-    const pixels = c.stbi_load_from_memory(png_bytes.ptr, @intCast(png_bytes.len), &dw, &dh, &dch, 4);
-    try testing.expect(pixels != null);
-    defer c.stbi_image_free(pixels);
-    try testing.expectEqual(result.sheet_w, @as(i32, @intCast(dw)));
-    try testing.expectEqual(result.sheet_h, @as(i32, @intCast(dh)));
-}
+    test "reports NoImagesFound for an empty folder" {
+        const allocator = std.testing.allocator;
+        var threaded: std.Io.Threaded = .init(allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
 
-test "packDir reports NoImagesFound for an empty folder" {
-    const allocator = testing.allocator;
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+        const cwd = std.Io.Dir.cwd();
+        const work = ".zig-cache/texpack-itest-empty";
+        cwd.deleteTree(io, work) catch {};
+        try cwd.createDirPath(io, work);
+        defer cwd.deleteTree(io, work) catch {};
 
-    const cwd = std.Io.Dir.cwd();
-    const work = ".zig-cache/texpack-itest-empty";
-    cwd.deleteTree(io, work) catch {};
-    try cwd.createDirPath(io, work);
-    defer cwd.deleteTree(io, work) catch {};
-
-    try testing.expectError(Error.NoImagesFound, packDir(allocator, io, work, work, "sheet", .{}));
-}
+        try expect.toReturnError(packDir(allocator, io, work, work, "sheet", .{}), Error.NoImagesFound);
+    }
+};

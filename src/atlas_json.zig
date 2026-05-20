@@ -79,29 +79,37 @@ fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
     try w.writeByte('"');
 }
 
-const testing = std.testing;
+const zspec = @import("zspec");
+const expect = zspec.expect;
 
-test "emits parseable TexturePacker JSON-hash" {
-    const frames = [_]Frame{
-        .{ .name = "hero.png", .x = 0, .y = 0, .w = 32, .h = 48 },
-        .{ .name = "tile/grass.png", .x = 34, .y = 0, .w = 16, .h = 16 },
-    };
-    const json = try emit(testing.allocator, &frames, 64, 64, "world.atlas.png");
-    defer testing.allocator.free(json);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
-    defer parsed.deinit();
-    const root = parsed.value.object;
-
-    const frames_obj = root.get("frames").?.object;
-    try testing.expectEqual(@as(usize, 2), frames_obj.count());
-
-    const grass = frames_obj.get("tile/grass.png").?.object;
-    const frame = grass.get("frame").?.object;
-    try testing.expectEqual(@as(i64, 34), frame.get("x").?.integer);
-    try testing.expectEqual(@as(i64, 16), frame.get("w").?.integer);
-    try testing.expectEqual(false, grass.get("rotated").?.bool);
-
-    const size = root.get("meta").?.object.get("size").?.object;
-    try testing.expectEqual(@as(i64, 64), size.get("w").?.integer);
+test {
+    zspec.runAll(@This());
 }
+
+pub const Emit = struct {
+    test "emits parseable TexturePacker JSON-hash" {
+        const alloc = std.testing.allocator;
+        const frames = [_]Frame{
+            .{ .name = "hero.png", .x = 0, .y = 0, .w = 32, .h = 48 },
+            .{ .name = "tile/grass.png", .x = 34, .y = 0, .w = 16, .h = 16 },
+        };
+        const json = try emit(alloc, &frames, 64, 64, "world.atlas.png");
+        defer alloc.free(json);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+        defer parsed.deinit();
+        const root = parsed.value.object;
+
+        const frames_obj = root.get("frames").?.object;
+        try expect.equal(frames_obj.count(), @as(usize, 2));
+
+        const grass = frames_obj.get("tile/grass.png").?.object;
+        const frame = grass.get("frame").?.object;
+        try expect.equal(frame.get("x").?.integer, @as(i64, 34));
+        try expect.equal(frame.get("w").?.integer, @as(i64, 16));
+        try expect.toBeFalse(grass.get("rotated").?.bool);
+
+        const size = root.get("meta").?.object.get("size").?.object;
+        try expect.equal(size.get("w").?.integer, @as(i64, 64));
+    }
+};

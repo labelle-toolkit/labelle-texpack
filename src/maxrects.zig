@@ -165,41 +165,48 @@ pub const Packer = struct {
     }
 };
 
-const testing = std.testing;
+const zspec = @import("zspec");
+const expect = zspec.expect;
 
-test "places every rect inside the bin without overlap" {
-    var packer = try Packer.init(testing.allocator, 128, 128);
-    defer packer.deinit();
+test {
+    zspec.runAll(@This());
+}
 
-    const sizes = [_][2]i32{
-        .{ 40, 40 }, .{ 30, 60 }, .{ 50, 20 }, .{ 25, 25 },
-        .{ 60, 30 }, .{ 16, 16 }, .{ 48, 48 }, .{ 32, 24 },
-    };
-    var placed: [sizes.len]Rect = undefined;
-    for (sizes, 0..) |s, i| {
-        placed[i] = (try packer.insert(s[0], s[1])) orelse return error.UnexpectedNoFit;
-    }
+pub const Packing = struct {
+    test "places every rect inside the bin without overlap" {
+        var packer = try Packer.init(std.testing.allocator, 128, 128);
+        defer packer.deinit();
 
-    for (placed, 0..) |r, i| {
-        try testing.expect(r.x >= 0 and r.y >= 0);
-        try testing.expect(r.right() <= 128 and r.bottom() <= 128);
-        for (placed[i + 1 ..]) |other| {
-            try testing.expect(!r.intersects(other));
+        const sizes = [_][2]i32{
+            .{ 40, 40 }, .{ 30, 60 }, .{ 50, 20 }, .{ 25, 25 },
+            .{ 60, 30 }, .{ 16, 16 }, .{ 48, 48 }, .{ 32, 24 },
+        };
+        var placed: [sizes.len]Rect = undefined;
+        for (sizes, 0..) |s, i| {
+            placed[i] = (try packer.insert(s[0], s[1])) orelse return error.UnexpectedNoFit;
+        }
+
+        for (placed, 0..) |r, i| {
+            try expect.toBeTrue(r.x >= 0 and r.y >= 0);
+            try expect.toBeTrue(r.right() <= 128 and r.bottom() <= 128);
+            for (placed[i + 1 ..]) |other| {
+                try expect.toBeFalse(r.intersects(other));
+            }
         }
     }
-}
 
-test "insert returns null when the rect cannot fit" {
-    var packer = try Packer.init(testing.allocator, 64, 64);
-    defer packer.deinit();
+    test "insert returns null when the rect cannot fit" {
+        var packer = try Packer.init(std.testing.allocator, 64, 64);
+        defer packer.deinit();
 
-    try testing.expect((try packer.insert(64, 64)) != null);
-    // Bin is now fully consumed.
-    try testing.expect((try packer.insert(1, 1)) == null);
-}
+        try expect.notToBeNull(try packer.insert(64, 64));
+        // Bin is now fully consumed.
+        try expect.toBeNull(try packer.insert(1, 1));
+    }
 
-test "a rect larger than the bin never fits" {
-    var packer = try Packer.init(testing.allocator, 32, 32);
-    defer packer.deinit();
-    try testing.expect((try packer.insert(33, 10)) == null);
-}
+    test "a rect larger than the bin never fits" {
+        var packer = try Packer.init(std.testing.allocator, 32, 32);
+        defer packer.deinit();
+        try expect.toBeNull(try packer.insert(33, 10));
+    }
+};
