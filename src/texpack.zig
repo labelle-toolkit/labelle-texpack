@@ -130,30 +130,66 @@ fn freeSprites(allocator: std.mem.Allocator, sprites: []Sprite) void {
     }
 }
 
-/// Decode every `.png` in `input_dir` (case-insensitive extension),
-/// skipping our own `.atlas.png` outputs and sub-directories.
+/// Decode every `.png` under `input_dir`, recursing into sub-folders.
+/// Each sprite's key is its path relative to `input_dir` (`/`-separated)
+/// so files sharing a basename across sub-folders stay distinct — and
+/// that path-style key is what the engine's atlas loader already
+/// accepts. Skips our own `.atlas.png` outputs.
 fn decodeFolder(
     allocator: std.mem.Allocator,
     io: std.Io,
     input_dir: []const u8,
 ) !std.ArrayList(Sprite) {
-    var dir = try std.Io.Dir.cwd().openDir(io, input_dir, .{ .iterate = true });
-    defer dir.close(io);
-
     var sprites: std.ArrayList(Sprite) = .empty;
     errdefer {
         freeSprites(allocator, sprites.items);
         sprites.deinit(allocator);
     }
+    try scanInto(allocator, io, input_dir, "", &sprites);
+    return sprites;
+}
+
+/// Recursive worker for `decodeFolder`. `rel` is the directory being
+/// scanned, relative to `input_dir` (empty at the top level).
+fn scanInto(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    input_dir: []const u8,
+    rel: []const u8,
+    sprites: *std.ArrayList(Sprite),
+) !void {
+    const dir_path = if (rel.len == 0)
+        input_dir
+    else
+        try std.fs.path.join(allocator, &.{ input_dir, rel });
+    defer if (rel.len != 0) allocator.free(dir_path);
+
+    var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
 
     var iter = dir.iterate();
     while (try iter.next(io)) |entry| {
-        if (entry.kind != .file) continue;
-        if (entry.name.len < 4) continue;
-        if (!std.ascii.eqlIgnoreCase(entry.name[entry.name.len - 4 ..], ".png")) continue;
-        if (std.ascii.endsWithIgnoreCase(entry.name, ".atlas.png")) continue;
+        // The entry's key/path relative to the input root.
+        const rel_key = if (rel.len == 0)
+            try allocator.dupe(u8, entry.name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ rel, entry.name });
+        errdefer allocator.free(rel_key);
 
-        const path = try std.fs.path.join(allocator, &.{ input_dir, entry.name });
+        if (entry.kind == .directory) {
+            try scanInto(allocator, io, input_dir, rel_key, sprites);
+            allocator.free(rel_key);
+            continue;
+        }
+        if (entry.kind != .file or rel_key.len < 4 or
+            !std.ascii.eqlIgnoreCase(rel_key[rel_key.len - 4 ..], ".png") or
+            std.ascii.endsWithIgnoreCase(rel_key, ".atlas.png"))
+        {
+            allocator.free(rel_key);
+            continue;
+        }
+
+        const path = try std.fs.path.join(allocator, &.{ input_dir, rel_key });
         defer allocator.free(path);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
         defer allocator.free(bytes);
@@ -165,16 +201,14 @@ fn decodeFolder(
         if (pixels == null or w <= 0 or h <= 0) return Error.DecodeFailed;
         errdefer c.stbi_image_free(pixels);
 
-        const owned_name = try allocator.dupe(u8, entry.name);
-        errdefer allocator.free(owned_name);
+        // `rel_key` ownership transfers to the Sprite on success.
         try sprites.append(allocator, .{
-            .name = owned_name,
+            .name = rel_key,
             .w = @intCast(w),
             .h = @intCast(h),
             .pixels = pixels,
         });
     }
-    return sprites;
 }
 
 const SheetSize = struct { w: i32, h: i32 };
@@ -392,5 +426,45 @@ pub const PackDir = struct {
         defer cwd.deleteTree(io, work) catch {};
 
         try expect.toReturnError(packDir(allocator, io, work, work, "sheet", .{}), Error.NoImagesFound);
+    }
+
+    test "recurses sub-folders and keys sprites by relative path" {
+        const allocator = std.testing.allocator;
+        var threaded: std.Io.Threaded = .init(allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+
+        const cwd = std.Io.Dir.cwd();
+        const work = ".zig-cache/texpack-itest-nested";
+        cwd.deleteTree(io, work) catch {};
+        try cwd.createDirPath(io, work);
+        try cwd.createDirPath(io, work ++ "/anim");
+        defer cwd.deleteTree(io, work) catch {};
+
+        // One PNG at the root, one inside a sub-folder. Both basenames
+        // are `frame.png` — only the relative-path key keeps them apart.
+        const fixtures = [_]struct { path: []const u8, key: []const u8 }{
+            .{ .path = work ++ "/frame.png", .key = "frame.png" },
+            .{ .path = work ++ "/anim/frame.png", .key = "anim/frame.png" },
+        };
+        for (fixtures) |fx| {
+            const png = try encodeSolidPng(allocator, 20, 20, .{ 255, 255, 255, 255 });
+            defer allocator.free(png);
+            try cwd.writeFile(io, .{ .sub_path = fx.path, .data = png });
+        }
+
+        const result = try packDir(allocator, io, work, work, "sheet", .{});
+        defer result.deinit(allocator);
+        try expect.equal(result.sprite_count, @as(usize, 2));
+
+        const json = try cwd.readFileAlloc(io, result.json_path, allocator, .limited(1 << 20));
+        defer allocator.free(json);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+        defer parsed.deinit();
+        const frames = parsed.value.object.get("frames").?.object;
+        try expect.equal(frames.count(), @as(usize, 2));
+        for (fixtures) |fx| {
+            try expect.notToBeNull(frames.get(fx.key));
+        }
     }
 };
